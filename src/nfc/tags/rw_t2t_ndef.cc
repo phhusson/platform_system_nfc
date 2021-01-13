@@ -925,8 +925,7 @@ tNFC_STATUS rw_t2t_read_ndef_last_block(void) {
   uint16_t total_ndef_bytes;
   uint16_t last_ndef_byte_offset;
   uint16_t terminator_tlv_byte_index;
-  tNFC_STATUS status;
-  uint16_t block;
+  tNFC_STATUS status = NFC_STATUS_OK;
 
   total_ndef_bytes = header_len + p_t2t->new_ndef_msg_len;
   num_ndef_bytes = 0;
@@ -941,60 +940,23 @@ tNFC_STATUS rw_t2t_read_ndef_last_block(void) {
   }
   p_t2t->ndef_last_block_num =
       (uint16_t)((last_ndef_byte_offset - 1) / T2T_BLOCK_SIZE);
-  block = p_t2t->ndef_last_block_num;
 
-  p_t2t->substate = RW_T2T_SUBSTATE_WAIT_READ_NDEF_LAST_BLOCK;
-  /* Read NDEF last block before updating */
-  status = rw_t2t_read(block);
-  if (status == NFC_STATUS_OK) {
-    if ((p_t2t->new_ndef_msg_len + 1) <= p_t2t->max_ndef_msg_len) {
-      /* Locate Terminator TLV Block */
-      total_ndef_bytes++;
-      terminator_tlv_byte_index = last_ndef_byte_offset;
+  if ((p_t2t->new_ndef_msg_len + 1) <= p_t2t->max_ndef_msg_len) {
+    /* Locate Terminator TLV Block */
+    terminator_tlv_byte_index = last_ndef_byte_offset;
 
-      while (num_ndef_bytes < total_ndef_bytes) {
-        if (rw_t2t_is_lock_res_byte((uint16_t)terminator_tlv_byte_index) ==
-            false)
-          num_ndef_bytes++;
-
-        terminator_tlv_byte_index++;
-      }
-
-      p_t2t->terminator_byte_index = terminator_tlv_byte_index - 1;
-    } else {
-      /* No space for Terminator TLV */
+    if (rw_t2t_is_lock_res_byte((uint16_t)terminator_tlv_byte_index) == false)
+      p_t2t->terminator_byte_index = terminator_tlv_byte_index;
+    else
       p_t2t->terminator_byte_index = 0x00;
-    }
+  } else {
+    /* No space for Terminator TLV */
+    p_t2t->terminator_byte_index = 0x00;
   }
+
   return status;
 }
 
-/*******************************************************************************
-**
-** Function         rw_t2t_read_terminator_tlv_block
-**
-** Description      This function will read the block where terminator tlv will
-**                  be added later
-**
-** Returns          NCI_STATUS_OK, if read was started. Otherwise, error status.
-**
-*******************************************************************************/
-tNFC_STATUS rw_t2t_read_terminator_tlv_block(void) {
-  tRW_T2T_CB* p_t2t = &rw_cb.tcb.t2t;
-  tNFC_STATUS status;
-  uint16_t block;
-
-  /* Send read command to read base block (Block % 4==0) where this block is
-   * also read as part of 16 bytes */
-  block = p_t2t->terminator_byte_index / T2T_BLOCK_SIZE;
-  block -= block % T2T_READ_BLOCKS;
-
-  p_t2t->substate = RW_T2T_SUBSTATE_WAIT_READ_TERM_TLV_BLOCK;
-  /* Read the block where Terminator TLV may be added later during NDEF Write
-   * operation */
-  status = rw_t2t_read(block);
-  return status;
-}
 
 /*******************************************************************************
 **
@@ -1414,25 +1376,27 @@ static uint8_t rw_t2t_get_ndef_flags(void) {
 *******************************************************************************/
 static uint16_t rw_t2t_get_ndef_max_size(void) {
   uint16_t offset;
-  uint8_t xx;
   tRW_T2T_CB* p_t2t = &rw_cb.tcb.t2t;
-  uint16_t tag_size = (p_t2t->tag_hdr[T2T_CC2_TMS_BYTE] * T2T_TMS_TAG_FACTOR) +
-                      (T2T_FIRST_DATA_BLOCK * T2T_BLOCK_LEN) +
-                      p_t2t->num_lockbytes;
+  uint16_t tag_size = (p_t2t->tag_hdr[T2T_CC2_TMS_BYTE] * T2T_TMS_TAG_FACTOR);
 
-  for (xx = 0; xx < p_t2t->num_mem_tlvs; xx++)
-    tag_size += p_t2t->mem_tlv[xx].num_bytes;
+  DLOG_IF(INFO, nfc_debug_enabled)
+      << StringPrintf("%s - T2T_Area size: %d", __func__, tag_size);
+
+  /* Add header to compute max T2T NDEF data offset */
+  tag_size += (T2T_FIRST_DATA_BLOCK * T2T_BLOCK_LEN);
 
   offset = p_t2t->ndef_msg_offset;
   p_t2t->max_ndef_msg_len = 0;
 
-  if ((tag_size < T2T_STATIC_SIZE) ||
-      (tag_size > (T2T_SECTOR_SIZE * T2T_MAX_SECTOR)) ||
+  if ((tag_size <= T2T_STATIC_SIZE) ||
       ((p_t2t->tag_hdr[T2T_CC0_NMN_BYTE] != T2T_CC0_NMN) &&
        (p_t2t->tag_hdr[T2T_CC0_NMN_BYTE] != 0))) {
     /* Tag not formated, assume static tag */
     p_t2t->max_ndef_msg_len = T2T_STATIC_SIZE - T2T_HEADER_SIZE -
                               T2T_TLV_TYPE_LEN - T2T_SHORT_NDEF_LEN_FIELD_LEN;
+    DLOG_IF(INFO, nfc_debug_enabled)
+        << StringPrintf("%s - Tag assumed static : max_ndef_msg_len=%d",
+                        __func__, p_t2t->max_ndef_msg_len);
     return p_t2t->max_ndef_msg_len;
   }
 
@@ -1444,15 +1408,19 @@ static uint16_t rw_t2t_get_ndef_max_size(void) {
     }
     offset++;
   }
+
   /* NDEF Length field length changes based on NDEF size */
   if ((p_t2t->max_ndef_msg_len >= T2T_LONG_NDEF_LEN_FIELD_BYTE0) &&
       ((p_t2t->ndef_msg_offset - p_t2t->ndef_header_offset) ==
        T2T_SHORT_NDEF_LEN_FIELD_LEN)) {
     p_t2t->max_ndef_msg_len -=
-        (p_t2t->max_ndef_msg_len == T2T_LONG_NDEF_LEN_FIELD_BYTE0)
-            ? 1
-            : (T2T_LONG_NDEF_LEN_FIELD_LEN - T2T_SHORT_NDEF_LEN_FIELD_LEN);
+        (T2T_LONG_NDEF_LEN_FIELD_LEN - T2T_SHORT_NDEF_LEN_FIELD_LEN);
   }
+
+  DLOG_IF(INFO, nfc_debug_enabled)
+      << StringPrintf("%s - Max NDEF data storage: max_ndef_msg_len=%d",
+                      __func__, p_t2t->max_ndef_msg_len);
+
   return p_t2t->max_ndef_msg_len;
 }
 
@@ -1470,14 +1438,49 @@ tNFC_STATUS rw_t2t_add_terminator_tlv(void) {
   tRW_T2T_CB* p_t2t = &rw_cb.tcb.t2t;
   tNFC_STATUS status;
   uint16_t block;
+  uint8_t term_byte_idx;
 
   /* Add Terminator TLV after NDEF Message */
-  p_t2t->terminator_tlv_block[p_t2t->terminator_byte_index % T2T_BLOCK_LEN] =
-      TAG_TERMINATOR_TLV;
-  p_t2t->substate = RW_T2T_SUBSTATE_WAIT_WRITE_TERM_TLV_CMPLT;
-
   block = p_t2t->terminator_byte_index / T2T_BLOCK_LEN;
-  status = rw_t2t_write(block, p_t2t->terminator_tlv_block);
+
+  if (block == p_t2t->ndef_last_block_num) {
+    DLOG_IF(INFO, nfc_debug_enabled) << StringPrintf(
+        "%s - Terminator TLV in same block %d as last NDEF"
+        " bytes",
+        __func__, block);
+
+    /* If Terminator TLV will reside on the NDEF Final block */
+    memcpy(p_t2t->terminator_tlv_block, p_t2t->ndef_last_block, T2T_BLOCK_LEN);
+
+    term_byte_idx = p_t2t->terminator_byte_index % T2T_BLOCK_LEN;
+
+    p_t2t->terminator_tlv_block[term_byte_idx] = TAG_TERMINATOR_TLV;
+    if (term_byte_idx < (T2T_BLOCK_LEN - 1)) {
+      for (int i = term_byte_idx + 1; i < T2T_BLOCK_LEN; i++)
+        p_t2t->terminator_tlv_block[i] = 0x00;
+    }
+
+    p_t2t->substate = RW_T2T_SUBSTATE_WAIT_WRITE_TERM_TLV_CMPLT;
+    status = rw_t2t_write(block, p_t2t->terminator_tlv_block);
+
+  } else if (p_t2t->terminator_byte_index != 0) {
+    /* If there is space for Terminator TLV and if it will reside outside
+     * NDEF Final block */
+    DLOG_IF(INFO, nfc_debug_enabled) << StringPrintf(
+        "%s - Terminator TLV in block %d following the last NDEF block",
+        __func__, block);
+    p_t2t->terminator_tlv_block[0] = TAG_TERMINATOR_TLV;
+    p_t2t->terminator_tlv_block[1] = 0x00;
+    p_t2t->terminator_tlv_block[2] = 0x00;
+    p_t2t->terminator_tlv_block[3] = 0x00;
+
+    p_t2t->substate = RW_T2T_SUBSTATE_WAIT_WRITE_TERM_TLV_CMPLT;
+    status = rw_t2t_write(block, p_t2t->terminator_tlv_block);
+
+  } else {
+    /* If there is no space for Terminator TLV, conclude NDEF procedure */
+    status = NFC_STATUS_CONTINUE;
+  }
 
   return status;
 }
@@ -1558,6 +1561,7 @@ static void rw_t2t_handle_ndef_write_rsp(uint8_t* p_data) {
   bool done = false;
   uint16_t block;
   uint8_t offset;
+  tNFC_STATUS status = NFC_STATUS_FAILED;
 
   switch (p_t2t->substate) {
     case RW_T2T_SUBSTATE_WAIT_READ_NDEF_FIRST_BLOCK:
@@ -1566,40 +1570,8 @@ static void rw_t2t_handle_ndef_write_rsp(uint8_t* p_data) {
       memcpy(p_t2t->ndef_first_block, p_data, T2T_BLOCK_LEN);
       /* Read ndef final block */
       if (rw_t2t_read_ndef_last_block() != NFC_STATUS_OK) failed = true;
-      break;
+      memset(p_t2t->terminator_tlv_block, 0, T2T_BLOCK_LEN);
 
-    case RW_T2T_SUBSTATE_WAIT_READ_NDEF_LAST_BLOCK:
-
-      offset = (uint8_t)(p_t2t->ndef_last_block_num - p_t2t->block_read) *
-               T2T_BLOCK_SIZE;
-      /* Backup the read NDEF final block */
-      memcpy(p_t2t->ndef_last_block, &p_data[offset], T2T_BLOCK_LEN);
-      if ((p_t2t->terminator_byte_index / T2T_BLOCK_SIZE) ==
-          p_t2t->ndef_last_block_num) {
-        /* If Terminator TLV will reside on the NDEF Final block */
-        memcpy(p_t2t->terminator_tlv_block, p_t2t->ndef_last_block,
-               T2T_BLOCK_LEN);
-        if (rw_t2t_write_ndef_first_block(0x0000, false) != NFC_STATUS_OK)
-          failed = true;
-      } else if (p_t2t->terminator_byte_index != 0) {
-        /* If there is space for Terminator TLV and if it will reside outside
-         * NDEF Final block */
-        if (rw_t2t_read_terminator_tlv_block() != NFC_STATUS_OK) failed = true;
-      } else {
-        if (rw_t2t_write_ndef_first_block(0x0000, false) != NFC_STATUS_OK)
-          failed = true;
-      }
-      break;
-
-    case RW_T2T_SUBSTATE_WAIT_READ_TERM_TLV_BLOCK:
-
-      offset = (uint8_t)(((p_t2t->terminator_byte_index / T2T_BLOCK_SIZE) -
-                          p_t2t->block_read) *
-                         T2T_BLOCK_SIZE);
-      /* Backup the read Terminator TLV block */
-      memcpy(p_t2t->terminator_tlv_block, &p_data[offset], T2T_BLOCK_LEN);
-
-      /* Write the first block for new NDEF Message */
       if (rw_t2t_write_ndef_first_block(0x0000, false) != NFC_STATUS_OK)
         failed = true;
       break;
@@ -1677,7 +1649,11 @@ static void rw_t2t_handle_ndef_write_rsp(uint8_t* p_data) {
       break;
 
     case RW_T2T_SUBSTATE_WAIT_WRITE_NDEF_LEN_BLOCK:
-      if (rw_t2t_add_terminator_tlv() != NFC_STATUS_OK) failed = true;
+      status = rw_t2t_add_terminator_tlv();
+      if (status == NFC_STATUS_CONTINUE)
+        done = true;
+      else if (status != NFC_STATUS_OK)
+        failed = true;
       break;
 
     case RW_T2T_SUBSTATE_WAIT_WRITE_TERM_TLV_CMPLT:
