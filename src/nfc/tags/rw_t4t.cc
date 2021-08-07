@@ -39,6 +39,7 @@
 using android::base::StringPrintf;
 
 extern bool nfc_debug_enabled;
+extern unsigned char appl_dta_mode_flag;
 
 /* main state */
 /* T4T is not activated                 */
@@ -1229,7 +1230,8 @@ static bool rw_t4t_validate_cc_file(void) {
     return false;
   }
 
-  if (p_t4t->cc_file.max_lc < 0x000D) {
+  if (p_t4t->cc_file.max_lc < 0x0001 ||
+      ((p_t4t->cc_file.max_lc < 0x000D) && appl_dta_mode_flag)) {
     LOG(ERROR) << StringPrintf("%s - MaxLc (%d) is too small", __func__,
                                p_t4t->cc_file.max_lc);
     return false;
@@ -1269,8 +1271,7 @@ static bool rw_t4t_validate_cc_file(void) {
 
   if (((p_t4t->cc_file.ndef_fc.write_access > T4T_FC_WRITE_ACCESS) &&
        (p_t4t->cc_file.ndef_fc.write_access <
-        T4T_FC_WRITE_ACCESS_PROP_START)) ||
-      (p_t4t->cc_file.ndef_fc.write_access == T4T_FC_NO_WRITE_ACCESS)) {
+        T4T_FC_WRITE_ACCESS_PROP_START))) {
     LOG(ERROR) << StringPrintf("%s - Write Access (0x%02X) is invalid",
                                __func__, p_t4t->cc_file.ndef_fc.write_access);
     return false;
@@ -1760,7 +1761,7 @@ static void rw_t4t_sm_detect_ndef(NFC_HDR* p_r_apdu) {
                         p_t4t->cc_file.ndef_fc.nlen_size) {
           p_t4t->ndef_status = RW_T4T_NDEF_STATUS_NDEF_DETECTED;
 
-          if (p_t4t->cc_file.ndef_fc.write_access != T4T_FC_WRITE_ACCESS) {
+          if (p_t4t->cc_file.ndef_fc.write_access == T4T_FC_NO_WRITE_ACCESS) {
             p_t4t->ndef_status |= RW_T4T_NDEF_STATUS_NDEF_READ_ONLY;
           }
 
